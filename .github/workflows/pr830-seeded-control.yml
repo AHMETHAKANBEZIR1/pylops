@@ -1,0 +1,91 @@
+name: PR830 PyTensor seed control
+on:
+  push:
+    branches: [diagnostic/pr830-seeded-control]
+permissions:
+  contents: read
+jobs:
+  control:
+    name: Shape RNG ${{ matrix.mode }}
+    runs-on: macos-15
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [unseeded, seed0]
+    env:
+      NUMBA_NUM_THREADS: '1'
+      SEED_MODE: ${{ matrix.mode }}
+      ROOT_DIAG_DIR: ${{ github.workspace }}/diagnostics
+    steps:
+      - name: Check out diagnosis only
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Check out immutable source head
+        uses: actions/checkout@v6
+        with:
+          ref: a95d9a70a6c0c52c96c505a53643a5445d25517d
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install uv and matching Python
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.11.9'
+      - name: Install exact locked dependencies
+        working-directory: source
+        run: uv sync --locked --extra advanced --extra stat --extra deep --all-groups
+      - name: Apply only the proposed seed in the diagnostic control
+        working-directory: source
+        shell: bash
+        run: |
+          mkdir -p "$ROOT_DIAG_DIR"
+          uv run --no-sync python - <<'PY'
+          import os
+          from pathlib import Path
+          path = Path("pytests/test_pytensoroperator.py")
+          source = path.read_text()
+          assert source.count("rng = np.random.default_rng()") == 1
+          if os.environ["SEED_MODE"] == "seed0":
+              path.write_text(source.replace("rng = np.random.default_rng()", "rng = np.random.default_rng(0)"))
+          PY
+          git diff -- pytests/test_pytensoroperator.py > "$ROOT_DIAG_DIR/source-control.patch"
+          git rev-parse HEAD > "$ROOT_DIAG_DIR/source-revision.txt"
+      - name: Run the same five tests in two fresh processes
+        working-directory: source
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.diagnostics
+        run: |
+          set -euo pipefail
+          for trial in 1 2; do
+            export DIAG_OUTPUT_DIR="$ROOT_DIAG_DIR/trial-$trial"
+            mkdir -p "$DIAG_OUTPUT_DIR"
+            uv run --no-sync pytest --color=no pytests/test_pytensoroperator.py 'pytests/test_radon.py::test_Radon3D[float32-par1]' -p diagnostic_capture 2>&1 | tee "$DIAG_OUTPUT_DIR/pytest.log"
+          done
+      - name: Compare all captured RNG state fields
+        working-directory: source
+        shell: bash
+        run: |
+          uv run --no-sync python - <<'PY'
+          import json, os
+          from pathlib import Path
+          import numpy as np
+          root = Path(os.environ["ROOT_DIAG_DIR"])
+          left = np.load(root / "trial-1/rng-before-radon.npz", allow_pickle=False)
+          right = np.load(root / "trial-2/rng-before-radon.npz", allow_pickle=False)
+          fields = {key: bool(np.array_equal(left[key], right[key])) for key in left.files}
+          result = {"mode": os.environ["SEED_MODE"], "equal_fields": fields, "identical_state": all(fields.values())}
+          (root / "repeatability.json").write_text(json.dumps(result, indent=2))
+          print(json.dumps(result))
+          if os.environ["SEED_MODE"] == "seed0":
+              assert result["identical_state"], "Seeded control did not make the downstream inputs reproducible"
+          PY
+      - name: Upload evidence even if any test fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shape-rng-${{ matrix.mode }}
+          path: diagnostics/
+          retention-days: 7
