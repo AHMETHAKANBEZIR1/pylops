@@ -1,0 +1,63 @@
+name: PR830 Mac diagnosis
+on:
+  push:
+    branches: [diagnostic/pr830-mac]
+permissions:
+  contents: read
+jobs:
+  compare:
+    name: Mac ARM64 ${{ matrix.label }}
+    runs-on: macos-15
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+            revision: ea91a4e617f768fb7d2fdd0fae09bb50ab848ee8
+          - label: head
+            revision: a95d9a70a6c0c52c96c505a53643a5445d25517d
+    env:
+      NUMBA_NUM_THREADS: '1'
+      DIAG_OUTPUT_DIR: ${{ github.workspace }}/diagnostics
+    steps:
+      - name: Check out diagnosis only
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Check out immutable source revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.revision }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install uv and Python matching Azure
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.11.9'
+      - name: Install exact locked dependencies
+        working-directory: source
+        run: uv sync --locked --extra advanced --extra stat --extra deep --all-groups
+      - name: Record numerical environment
+        working-directory: source
+        shell: bash
+        run: |
+          mkdir -p "$DIAG_OUTPUT_DIR"
+          uv run --no-sync python -c 'import sys,platform,numpy,scipy,numba; print(sys.version); print(platform.platform(),platform.machine()); print("numpy",numpy.__version__,"scipy",scipy.__version__,"numba",numba.__version__); numpy.show_config()' > "$DIAG_OUTPUT_DIR/environment.txt"
+          git rev-parse HEAD > "$DIAG_OUTPUT_DIR/source-revision.txt"
+      - name: Run unchanged full suite with capture-only plugin
+        working-directory: source
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.diagnostics
+        run: |
+          set -euo pipefail
+          uv run --no-sync pytest --color=no pytests/ -p diagnostic_capture 2>&1 | tee "$DIAG_OUTPUT_DIR/pytest.log"
+      - name: Upload diagnosis even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.label }}
+          path: diagnostics/
+          retention-days: 7
