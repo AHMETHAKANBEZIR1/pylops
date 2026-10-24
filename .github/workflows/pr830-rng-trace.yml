@@ -1,0 +1,74 @@
+name: PR830 same Mac RNG trace
+on:
+  push:
+    branches: [diagnostic/pr830-rng-trace]
+permissions:
+  contents: read
+jobs:
+  trace:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      NUMBA_NUM_THREADS: '1'
+    steps:
+      - name: Check out capture-only plugin
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Check out immutable base
+        uses: actions/checkout@v6
+        with:
+          ref: ea91a4e617f768fb7d2fdd0fae09bb50ab848ee8
+          path: base-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out immutable head
+        uses: actions/checkout@v6
+        with:
+          ref: a95d9a70a6c0c52c96c505a53643a5445d25517d
+          path: head-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install uv and Python matching Azure
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.11.9'
+      - name: Install locked base dependencies
+        working-directory: base-source
+        run: uv sync --locked --extra advanced --extra stat --extra deep --all-groups
+      - name: Test base without altering test outcomes
+        working-directory: base-source
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.diagnostics
+          DIAG_OUTPUT_DIR: ${{ github.workspace }}/diagnostics/base
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIAG_OUTPUT_DIR"
+          uv run --no-sync python -c 'import sys,platform,numpy,scipy,numba; print(sys.version); print(platform.platform(),platform.machine()); print("numpy",numpy.__version__,"scipy",scipy.__version__,"numba",numba.__version__); numpy.show_config()' > "$DIAG_OUTPUT_DIR/environment.txt"
+          git rev-parse HEAD > "$DIAG_OUTPUT_DIR/source-revision.txt"
+          uv run --no-sync pytest --color=no pytests/ -p diagnostic_capture 2>&1 | tee "$DIAG_OUTPUT_DIR/pytest.log"
+      - name: Install locked head dependencies
+        if: success() || failure()
+        working-directory: head-source
+        run: uv sync --locked --extra advanced --extra stat --extra deep --all-groups
+      - name: Test head on the same VM
+        if: success() || failure()
+        working-directory: head-source
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.diagnostics
+          DIAG_OUTPUT_DIR: ${{ github.workspace }}/diagnostics/head
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIAG_OUTPUT_DIR"
+          uv run --no-sync python -c 'import sys,platform,numpy,scipy,numba; print(sys.version); print(platform.platform(),platform.machine()); print("numpy",numpy.__version__,"scipy",scipy.__version__,"numba",numba.__version__); numpy.show_config()' > "$DIAG_OUTPUT_DIR/environment.txt"
+          git rev-parse HEAD > "$DIAG_OUTPUT_DIR/source-revision.txt"
+          uv run --no-sync pytest --color=no pytests/ -p diagnostic_capture 2>&1 | tee "$DIAG_OUTPUT_DIR/pytest.log"
+      - name: Upload both traces even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: same-mac-rng-traces
+          path: diagnostics/
+          retention-days: 7

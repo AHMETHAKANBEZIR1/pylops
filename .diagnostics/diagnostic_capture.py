@@ -1,5 +1,6 @@
 """Record one existing test's RNG inputs without altering its result or tolerances."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import numpy as np
 import pytest
 
 TARGET = "test_radon.py::test_Radon3D[float32-par1]"
+_trace_complete = False
 
 
 def _output():
@@ -56,3 +58,30 @@ def pytest_sessionfinish(session, exitstatus):
     (_output() / "session-result.json").write_text(
         json.dumps(data, indent=2), encoding="utf-8"
     )
+
+
+def _trace_state(nodeid, phase):
+    state = np.random.get_state()
+    data = {
+        "nodeid": nodeid,
+        "phase": phase,
+        "keys_sha256": hashlib.sha256(state[1].tobytes()).hexdigest(),
+        "position": state[2],
+        "has_gauss": state[3],
+        "cached_gaussian": state[4],
+    }
+    with (_output() / "rng-trace.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(data) + "\n")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    global _trace_complete
+    record = not _trace_complete
+    if record:
+        _trace_state(item.nodeid, "before_protocol")
+    yield
+    if record:
+        _trace_state(item.nodeid, "after_protocol")
+    if item.nodeid.endswith(TARGET):
+        _trace_complete = True
